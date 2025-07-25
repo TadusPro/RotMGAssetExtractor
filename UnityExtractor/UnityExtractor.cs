@@ -53,7 +53,10 @@ namespace RotMGAssetExtractor.Parser
             {
                 sb.Append(" | TextAssets: ").Append(res.assetTextAssets.Count);
             }
-
+            if (types.Contains(ExtractionType.All) && res.spritesheet != null)
+            {
+                sb.Append(" | Spritesheet: ").Append(res.spritesheet.Name);
+            }
             Debug.WriteLine(sb.ToString());
             return res;
         }
