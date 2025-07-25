@@ -39,11 +39,11 @@ namespace RotMGAssetExtractor
                 throw new Exception("Failed to fetch build information.");
 
             BuildHash = fetchedBuildHash;
-            //if (await LoadCacheAsync())
-            //{
-            //    Debug.WriteLine("[GameData] Initialized from cache.");
-            //    return;
-            //}
+            if (await LoadCacheAsync())
+            {
+                Debug.WriteLine("[GameData] Initialized from cache.");
+                return;
+            }
 
             Debug.WriteLine("[GameData] Downloading new gamedata.");
             await DownloadAll(downloader);
