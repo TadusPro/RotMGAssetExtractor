@@ -10,21 +10,28 @@ namespace RotMGAssetExtractor
 {
     public static class RotMGAssetExtractor
     {
-        private static string CacheDirectory = "gameData";
+        private static string CacheDirectory = "GameData";
         private const string MetadataFileName = "meta.xml";
         private const string ImagesDirectoryName = "images";
         private const string ModelsDirectoryName = "models";
         private const string SpritesheetFileName = "spritesheet.xml";
+
 
         public static string BuildHash { get; set; } = "";
         public static string BuildVersion { get; set; } = "";
         public static Dictionary<string, List<object>> BuildModelsByType { get; } = new(StringComparer.OrdinalIgnoreCase);
         public static Dictionary<string, byte[]> BuildImages { get; } = new Dictionary<string, byte[]>();
         public static byte[] BuildSpritesheetf = new byte[0];
+        internal static ExtractionType[] ExtractionTypes { get; set; } = Array.Empty<ExtractionType>();
 
-        public static async Task InitAsync(string basePath)
+        public static Task InitAsync(string basePath)
         {
-            CacheDirectory = Path.Combine(basePath, "gameData");
+            return InitAsync(basePath, ExtractionType.All);
+        }
+        public static async Task InitAsync(string basePath, params ExtractionType[] extractionTypes)
+        {
+            ExtractionTypes = extractionTypes;
+            CacheDirectory = Path.Combine(basePath, "GameData");
             var downloader = new Downloading.Downloader();
             var (_, fetchedBuildHash) = await downloader.FetchBuildInfoAsync();
 
@@ -241,14 +248,18 @@ namespace RotMGAssetExtractor
                 throw new Exception("No files found.");
             }
 
-            // Global metadata extraction
-            var meta = fileList.FirstOrDefault(f => f.file == "global-metadata.dat");
-            if (meta != null)
+            // Global metadata extraction // if extractiontype all or gameversion is set
+            if (ExtractionTypes.Contains(ExtractionType.GameVersion) && ExtractionTypes.Contains(ExtractionType.All))
             {
-                var data = await downloader.DownloadAndDecompressFileAsync(meta.url);
-                BuildVersion = unityExtractor.GetUnityVersionFromMetadata(data);
-                fileList.Remove(meta);
+                var meta = fileList.FirstOrDefault(f => f.file == "global-metadata.dat");
+                if (meta != null)
+                {
+                    var data = await downloader.DownloadAndDecompressFileAsync(meta.url);
+                    BuildVersion = unityExtractor.GetUnityVersionFromMetadata(data);
+                    fileList.Remove(meta);
+                }
             }
+            
 
             // Download and process each relevant resource file
             var processedResources = new List<Resources>();
@@ -256,35 +267,79 @@ namespace RotMGAssetExtractor
             var resSFiles = fileList.Where(f => f.file.EndsWith(".resS"))
                                     .ToDictionary(f => f.file, f => f);
 
-            foreach (var assetFile in assetFiles)
+
+            if (ExtractionTypes.Contains(ExtractionType.All) || 
+                ExtractionTypes.Contains(ExtractionType.Models) || 
+                ExtractionTypes.Contains(ExtractionType.Spritesheet) || 
+                ExtractionTypes.Contains(ExtractionType.ImagesLight) || 
+                ExtractionTypes.Contains(ExtractionType.ImagesLight))
             {
-                var assetData = await downloader.DownloadAndDecompressFileAsync(assetFile.url);
-                byte[]? resSData = null;
-
-                // The corresponding .resS file has the same name but with a .resS extension
-                var resSFileName = Path.ChangeExtension(assetFile.file, ".resS");
-                if (resSFiles.TryGetValue(resSFileName, out var resSFile))
+                // inside here, only download and process the file "resources.assets" nothing more
+                var assetFiles2 = assetFiles.Where(f => f.file == "resources.assets").ToList();
+                if (assetFiles2.Count == 0)
                 {
-                    resSData = await downloader.DownloadAndDecompressFileAsync(resSFile.url);
+                    throw new Exception("No resources.assets file found in the file list.");
                 }
+                var assetData = await downloader.DownloadAndDecompressFileAsync(assetFiles2.FirstOrDefault().url);
+                processedResources.Add(unityExtractor.ProccessResource("resources.assets", assetData));
 
-                processedResources.Add(unityExtractor.ProccessResource(assetFile.file, assetData, resSData));
             }
 
+            if (ExtractionTypes.Contains(ExtractionType.All))
+            {
+                // inside here skip the file "resources.assets" and process all other asset files remove it from the list
+                assetFiles = assetFiles.Where(f => f.file != "resources.assets").ToList();
+
+                foreach (var assetFile in assetFiles)
+                {
+                    var assetData = await downloader.DownloadAndDecompressFileAsync(assetFile.url);
+                    byte[]? resSData = null;
+
+                    // The corresponding .resS file has the same name but with a .resS extension
+                    var resSFileName = Path.ChangeExtension(assetFile.file, ".resS");
+                    if (resSFiles.TryGetValue(resSFileName, out var resSFile))
+                    {
+                        resSData = await downloader.DownloadAndDecompressFileAsync(resSFile.url);
+                    }
+
+                    processedResources.Add(unityExtractor.ProccessResource(assetFile.file, assetData, resSData));
+                }
+            }
+
+            
+
             // Now that all resources are parsed, perform the combined processing steps
-            unityExtractor.ExportSpritesheet(processedResources);
-            unityExtractor.ExportAllTexturesAsPng(processedResources);
-            unityExtractor.LoadXmlTextAssets(processedResources);
+            if (ExtractionTypes.Contains(ExtractionType.ImagesLight) || ExtractionTypes.Contains(ExtractionType.ImagesAll) || ExtractionTypes.Contains(ExtractionType.All))
+            {
+                unityExtractor.ExportAllTexturesAsPng(processedResources);
+
+            }
+            if (ExtractionTypes.Contains(ExtractionType.Models) || ExtractionTypes.Contains(ExtractionType.All))
+            {
+                unityExtractor.LoadXmlTextAssets(processedResources);
+            }
+            if (ExtractionTypes.Contains(ExtractionType.Spritesheet) || ExtractionTypes.Contains(ExtractionType.All))
+            {
+                unityExtractor.ExportSpritesheet(processedResources);
+
+            }
 
             //unityExtractor.UnusedNodesDebug();
 
             GC.Collect();
 
-            Debug.WriteLine("[GameData] Successfully parsed new assets.");
-            Debug.WriteLine("[GameData] Images " + BuildImages.Count());
-            Debug.WriteLine("[GameData] Model types " + BuildModelsByType.Count());
-            int totalModels = BuildModelsByType.Values.Sum(list => list.Count);
-            Debug.WriteLine("[GameData] Total Models " + totalModels);
+            var summary = new StringBuilder("[GameData] Successfully parsed new assets.");
+            if (ExtractionTypes.Contains(ExtractionType.All) || ExtractionTypes.Contains(ExtractionType.ImagesLight) || ExtractionTypes.Contains(ExtractionType.ImagesAll))
+            {
+                summary.Append($" Images: {BuildImages.Count()}.");
+            }
+
+            if (ExtractionTypes.Contains(ExtractionType.All) || ExtractionTypes.Contains(ExtractionType.Models))
+            {
+                int totalModels = BuildModelsByType.Values.Sum(list => list.Count);
+                summary.Append($" Model types: {BuildModelsByType.Count()}, Total Models: {totalModels}.");
+            }
+            Debug.WriteLine(summary.ToString());
         }
         private static bool TryLoadSpritesheet(string path)
         {

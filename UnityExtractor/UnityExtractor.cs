@@ -35,7 +35,26 @@ namespace RotMGAssetExtractor.Parser
             unusedAttrByNodeStatic = unusedAttrByNode;
             unusedChildByNodeStatic = unusedChildByNode;
             var res = new Resources(assetsData, resSData);
-            Debug.WriteLine("[GameData] Proccesing " + name + " SpriteAtlases " + res.assetSpriteAtlases.Count() + ", Texture2Ds " + res.assetTexture2Ds.Count() + ", TextAssets " + res.assetTextAssets.Count());
+            var sb = new StringBuilder("[GameData] Processing ").Append(name);
+
+            var types = RotMGAssetExtractor.ExtractionTypes;
+
+            if (types.Contains(ExtractionType.All) && res.assetSpriteAtlases.Any())
+            {
+                sb.Append(" | SpriteAtlases: ").Append(res.assetSpriteAtlases.Count);
+            }
+
+            if ((types.Contains(ExtractionType.All) || types.Contains(ExtractionType.ImagesLight) || types.Contains(ExtractionType.ImagesAll)) && res.assetTexture2Ds.Any())
+            {
+                sb.Append(" | Texture2Ds: ").Append(res.assetTexture2Ds.Count);
+            }
+
+            if ((types.Contains(ExtractionType.All) || types.Contains(ExtractionType.Models)) && res.assetTextAssets.Any())
+            {
+                sb.Append(" | TextAssets: ").Append(res.assetTextAssets.Count);
+            }
+
+            Debug.WriteLine(sb.ToString());
             return res;
         }
 
