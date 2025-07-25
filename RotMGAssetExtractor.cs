@@ -163,12 +163,10 @@ namespace RotMGAssetExtractor
         {
             var decompiled = new DecompiledSpriteSheet();
             var spriteGroups = SpriteFlatBuffer.GetSprites();
-            Debug.WriteLine($"[WriteSpritesheet] Found {spriteGroups.Count} sprite groups to process.");
 
             foreach (var group in spriteGroups)
             {
                 var cleanedGroupName = Clean(group.Key);
-                Debug.WriteLine($"[WriteSpritesheet] Processing SpriteGroup: '{cleanedGroupName}' (Original: '{group.Key}')");
                 var sg = new SpriteGroup { Name = cleanedGroupName };
 
                 foreach (var s in group.Value)
@@ -183,25 +181,24 @@ namespace RotMGAssetExtractor
                         H = s.Value.Coords[3]
                     };
                     sg.Sprites.Add(spriteInfo);
-                    Debug.WriteLine($"[WriteSpritesheet]   - Added Sprite: Index={spriteInfo.Index}, AtlasId={spriteInfo.AtlasId}, X={spriteInfo.X}, Y={spriteInfo.Y}, W={spriteInfo.W}, H={spriteInfo.H}");
                 }
                 decompiled.SpriteGroups.Add(sg);
             }
+            int count = 0;
+            foreach (var group in decompiled.SpriteGroups)
+                foreach (var sprite in group.Sprites)
+                    count++;
 
-            Debug.WriteLine($"[WriteSpritesheet] Finished decompiling sprites. Total groups: {decompiled.SpriteGroups.Count}");
-            Debug.WriteLine("[WriteSpritesheet] Creating XmlSerializer for DecompiledSpriteSheet.");
             var ser = new XmlSerializer(typeof(DecompiledSpriteSheet));
 
             try
             {
                 using var fs = File.Create(path);
-                Debug.WriteLine("[WriteSpritesheet] Serializing DecompiledSpriteSheet to XML...");
                 ser.Serialize(fs, decompiled);
-                Debug.WriteLine("[WriteSpritesheet] Serialization complete.");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[WriteSpritesheet] ERROR: An exception occurred during serialization: {ex}");
+                Debug.WriteLine($"[GameData] ERROR: An exception occurred during serialization: {ex}");
                 throw; // Re-throw the exception to not hide the error
             }
         }
@@ -321,7 +318,7 @@ namespace RotMGAssetExtractor
             if (ExtractionTypes.Contains(ExtractionType.Spritesheet) || ExtractionTypes.Contains(ExtractionType.All))
             {
                 unityExtractor.ExportSpritesheet(processedResources);
-
+                SpriteFlatBuffer.Reload();
             }
 
             //unityExtractor.UnusedNodesDebug();
@@ -338,6 +335,12 @@ namespace RotMGAssetExtractor
             {
                 int totalModels = BuildModelsByType.Values.Sum(list => list.Count);
                 summary.Append($" Model types: {BuildModelsByType.Count()}, Total Models: {totalModels}.");
+            }
+            if (ExtractionTypes.Contains(ExtractionType.Spritesheet) || ExtractionTypes.Contains(ExtractionType.All))
+            {
+                int spriteCount = SpriteFlatBuffer.GetSprites().Sum(g => g.Value.Count);
+                summary.Append($" spritesheet keys: {spriteCount}.");
+                
             }
             Debug.WriteLine(summary.ToString());
         }

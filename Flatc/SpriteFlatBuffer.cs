@@ -7,14 +7,14 @@ namespace RotMGAssetExtractor.Flatc
 {
     public static class SpriteFlatBuffer
     {
-        private static SpriteSheet? _spritesheet;
+        private static SpriteSheetRoot? _spritesheetRoot;
         private static Dictionary<string, Dictionary<int, (int AtlasId, int[] Coords)>> _spriteMap = new();
 
         public static void Reload()
         {
             if (RotMGAssetExtractor.BuildSpritesheetf.Length == 0) return;
             var buf = new Google.FlatBuffers.ByteBuffer(RotMGAssetExtractor.BuildSpritesheetf);
-            _spritesheet = SpriteSheet.GetRootAsSpriteSheet(buf);
+            _spritesheetRoot = SpriteSheetRoot.GetRootAsSpriteSheetRoot(buf);
             BuildSpriteMap();
         }
 
@@ -41,22 +41,52 @@ namespace RotMGAssetExtractor.Flatc
 
         private static void BuildSpriteMap()
         {
-            if (!_spritesheet.HasValue) return;
+            if (!_spritesheetRoot.HasValue)
+            {
+                return;
+            }
             _spriteMap.Clear();
 
-            // try to use valid name; fallback to first discovered sheet name
-            var raw = _spritesheet.Value.Name;
-            var sheetName = CleanName(raw);
+            var totalSheets = _spritesheetRoot.Value.SpritesLength;
 
-            _spriteMap[sheetName] = new Dictionary<int, (int AtlasId, int[] Coords)>();
-
-            for (int i = 0; i < _spritesheet.Value.SpritesLength; i++)
+            for (int i = 0; i < totalSheets; i++)
             {
-                var sprite = _spritesheet.Value.Sprites(i);
-                if (sprite == null || sprite.Value.Position == null) continue;
-                var pos = sprite.Value.Position.Value;
-                _spriteMap[sheetName][sprite.Value.Index] =
-                    ((int)sprite.Value.AtlasId, new[] { (int)pos.X, (int)pos.Y, (int)pos.W, (int)pos.H });
+                var sheet = _spritesheetRoot.Value.Sprites(i);
+                if (!sheet.HasValue)
+                {
+                    continue;
+                }
+
+                var currentSheet = sheet.Value;
+                var sheetName = CleanName(currentSheet.Name);
+                var sheetAtlasId = (int)currentSheet.AtlasId;
+
+                if (string.IsNullOrEmpty(sheetName))
+                {
+                    sheetName = $"spritesheet_{sheetAtlasId}";
+                }
+
+                if (!_spriteMap.ContainsKey(sheetName))
+                {
+                    _spriteMap[sheetName] = new Dictionary<int, (int AtlasId, int[] Coords)>();
+                }
+
+                var totalSpritesInSheet = currentSheet.SpritesLength;
+
+                for (int j = 0; j < totalSpritesInSheet; j++)
+                {
+                    var sprite = currentSheet.Sprites(j);
+                    if (!sprite.HasValue || !sprite.Value.Position.HasValue)
+                    {
+                        continue;
+                    }
+
+                    var pos = sprite.Value.Position.Value;
+                    var spriteIndex = sprite.Value.Index;
+
+                    _spriteMap[sheetName][spriteIndex] =
+                        (sheetAtlasId, new[] { (int)pos.X, (int)pos.Y, (int)pos.W, (int)pos.H });
+                }
             }
         }
 

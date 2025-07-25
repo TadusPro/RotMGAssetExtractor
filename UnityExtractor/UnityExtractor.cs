@@ -276,7 +276,6 @@ namespace RotMGAssetExtractor.Parser
             {
                 Debug.WriteLine("[GameData] Storing and processing spritesheetf");
                 RotMGAssetExtractor.BuildSpritesheetf = spritesheetAsset.Script;
-                SpriteFlatBuffer.Reload();
             }
         }
 
