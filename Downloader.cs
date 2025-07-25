@@ -48,8 +48,8 @@ namespace RotMGAssetExtractor.Downloading
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Failed to fetch build info: {ex.Message}");
-                return (null, null);
+                Debug.WriteLine($"[GameData] Failed to fetch build info: {ex.Message}");
+                return (null, null); 
             }
         }
 
@@ -75,7 +75,7 @@ namespace RotMGAssetExtractor.Downloading
                 var response = await _httpClient.GetAsync(checksumUrl);
                 if (!response.IsSuccessStatusCode)
                 {
-                    Debug.WriteLine($"Failed to fetch file list: {response.StatusCode} - {response.ReasonPhrase}");
+                    Debug.WriteLine($"[GameData] Failed to fetch file list: {response.StatusCode} - {response.ReasonPhrase}");
                     return new List<FileData>();
                 }
 
@@ -107,7 +107,7 @@ namespace RotMGAssetExtractor.Downloading
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Failed to fetch or parse file list: {ex.Message}");
+                Debug.WriteLine($"[GameData] Failed to fetch or parse file list: {ex.Message}");
                 return new List<FileData>();
             }
         }
@@ -126,7 +126,7 @@ namespace RotMGAssetExtractor.Downloading
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Failed to download or decompress file: {ex.Message}");
+                Debug.WriteLine($"[GameData] Failed to download or decompress file: {ex.Message}");
                 throw;
             }
         }
