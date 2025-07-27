@@ -49,58 +49,66 @@ namespace RotMGAssetExtractor.Flatc
             Debug.WriteLine("[SpriteFlatBuffer] BuildSpriteMap: Clearing existing sprite map.");
             _spriteMap.Clear();
 
-            var totalSheets = _spritesheetRoot.Value.SpritesLength;
-            Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Found {totalSheets} sprite sheets in the root.");
+            var root = _spritesheetRoot.Value;
 
+            // Process static sprites
+            var totalSheets = root.SpritesLength;
+            Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Found {totalSheets} static sprite sheets.");
             for (int i = 0; i < totalSheets; i++)
             {
-                var sheet = _spritesheetRoot.Value.Sprites(i);
-                if (!sheet.HasValue)
-                {
-                    Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Sheet at index {i} is null. Skipping.");
-                    continue;
-                }
+                var sheet = root.Sprites(i);
+                if (!sheet.HasValue) continue;
 
                 var currentSheet = sheet.Value;
                 var sheetName = CleanName(currentSheet.Name);
                 var sheetAtlasId = (int)currentSheet.AtlasId;
-                Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Processing sheet index {i}: Name='{sheetName}', AtlasId={sheetAtlasId}");
 
-
-                if (string.IsNullOrEmpty(sheetName))
-                {
-                    sheetName = $"spritesheet_{sheetAtlasId}";
-                    Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Sheet name was empty. Generated name: '{sheetName}'");
-                }
+                if (string.IsNullOrEmpty(sheetName)) continue;
 
                 if (!_spriteMap.ContainsKey(sheetName))
                 {
                     _spriteMap[sheetName] = new Dictionary<int, (int AtlasId, int[] Coords)>();
-                    Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Created new sprite map entry for '{sheetName}'.");
                 }
 
-                var totalSpritesInSheet = currentSheet.SpritesLength;
-                Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Sheet '{sheetName}' contains {totalSpritesInSheet} sprites.");
-
-
-                for (int j = 0; j < totalSpritesInSheet; j++)
+                for (int j = 0; j < currentSheet.SpritesLength; j++)
                 {
                     var sprite = currentSheet.Sprites(j);
-                    if (!sprite.HasValue || !sprite.Value.Position.HasValue)
-                    {
-                        Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Sprite at index {j} in sheet '{sheetName}' is null or has no position. Skipping.");
-                        continue;
-                    }
+                    if (!sprite.HasValue || !sprite.Value.Position.HasValue) continue;
 
                     var pos = sprite.Value.Position.Value;
-                    var spriteIndex = sprite.Value.Index;
-
-                    var coords = new[] { (int)pos.X, (int)pos.Y, (int)pos.W, (int)pos.H };
-                    _spriteMap[sheetName][spriteIndex] = (sheetAtlasId, coords);
-                    
-                    //Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Mapped sprite for '{sheetName} {spriteIndex}', AtlasId: {sheetAtlasId}, Coords: [{string.Join(",", coords)}]");
+                    _spriteMap[sheetName][(int)sprite.Value.Index] =
+                        (sheetAtlasId, new[] { (int)pos.X, (int)pos.Y, (int)pos.W, (int)pos.H });
                 }
             }
+
+            // Process animated sprites
+            var totalAnimatedSheets = root.AnimatedSpritesLength;
+            Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Found {totalAnimatedSheets} animated sprite sheets.");
+            for (int i = 0; i < totalAnimatedSheets; i++)
+            {
+                var animatedSheet = root.AnimatedSprites(i);
+                if (!animatedSheet.HasValue || !animatedSheet.Value.Sprite.HasValue || !animatedSheet.Value.Sprite.Value.Position.HasValue) continue;
+
+                var currentAnimatedSheet = animatedSheet.Value;
+                var sheetName = CleanName(currentAnimatedSheet.Name);
+                var sprite = currentAnimatedSheet.Sprite.Value;
+                var pos = sprite.Position.Value;
+                
+                // Animated sprites seem to have their AtlasId on the nested sprite object itself.
+                var atlasId = (int)sprite.AtlasId; 
+
+                if (string.IsNullOrEmpty(sheetName)) continue;
+
+                if (!_spriteMap.ContainsKey(sheetName))
+                {
+                    _spriteMap[sheetName] = new Dictionary<int, (int AtlasId, int[] Coords)>();
+                }
+
+                _spriteMap[sheetName][(int)currentAnimatedSheet.Index] =
+                    (atlasId, new[] { (int)pos.X, (int)pos.Y, (int)pos.W, (int)pos.H });
+            }
+
+
             Debug.WriteLine($"[SpriteFlatBuffer] BuildSpriteMap: Finished processing. Total sprite groups in map: {_spriteMap.Count}");
 
             // Add a warning if the 'players' or 'playerskins' sprite sheets are not found.
