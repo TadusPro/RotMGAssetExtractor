@@ -41,6 +41,7 @@ namespace RotMGAssetExtractor
             BuildHash = fetchedBuildHash;
             if (await LoadCacheAsync())
             {
+                await ImageBuffer.LoadAllAtlasesAsync();
                 Debug.WriteLine("[GameData] Initialized from cache.");
                 return;
             }
@@ -48,6 +49,7 @@ namespace RotMGAssetExtractor
             Debug.WriteLine("[GameData] Downloading new gamedata.");
             await DownloadAll(downloader);
             await SaveCacheAsync();
+            await ImageBuffer.LoadAllAtlasesAsync();
             Debug.WriteLine("[GameData] Initialized.");
         }
 
@@ -76,7 +78,7 @@ namespace RotMGAssetExtractor
                     foreach (var file in Directory.GetFiles(imagesPath))
                     {
                         var fileName = Path.GetFileName(file);
-                        BuildImages[fileName] = File.ReadAllBytes(file);
+                        BuildImages[fileName] = await File.ReadAllBytesAsync(file);
                     }
                 }
 

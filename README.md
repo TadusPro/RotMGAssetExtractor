@@ -24,3 +24,9 @@ Initialize the extractor by calling `InitAsync`. You can either extract all asse
 
 This is the simplest way to use the extractor. It will download and process all available game assets.
 
+## Acknowledgements
+
+A special thanks to the following individuals for their contributions and support:
+
+- **Xcom** - Alot of this project models a direct port of [Realmshark](https://github.com/X-com/RealmShark).
+- **Smol HKgamerafa**
