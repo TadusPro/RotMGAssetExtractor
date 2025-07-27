@@ -20,8 +20,8 @@ namespace RotMGAssetExtractor.Flatc
         private static Image<Rgba32>? emptyImg;
 
         private static readonly string[] spriteSheets = { 
-            "characters", 
             "groundTiles", 
+            "characters", 
             "characters_masks", 
             "mapObjects" 
         };
@@ -75,8 +75,10 @@ namespace RotMGAssetExtractor.Flatc
         /// <summary>
         /// Returns the sprite image for the given Texture, or null if not found.
         /// </summary>
-        public static Image<Rgba32>? GetImage(ITexture texture)
+        public static Image<Rgba32>? GetImage(ITexture texture, int itemid = -1)
         {
+
+
             if (texture == null)
             {
                 return null;
@@ -93,7 +95,7 @@ namespace RotMGAssetExtractor.Flatc
             var spriteCoords = SpriteFlatBuffer.GetSpriteCoordinates(fileName, itemOffset);
             if (spriteCoords == null || spriteCoords.Length < 4)
             {
-                Debug.WriteLine($"[ImageBuffer] Warning: Could not find sprite for '{fileName}' at index {itemOffset}.");
+                Debug.WriteLine($"[ImageBuffer] Warning: Could not find sprite for '{fileName}' at index {itemOffset} (ItemId: {itemid}).");
                 return null;
             }
 
@@ -105,26 +107,29 @@ namespace RotMGAssetExtractor.Flatc
             int atlasId = SpriteFlatBuffer.GetSpriteAtlasId(fileName, itemOffset);
             if (atlasId == 0)
             {
-                return null;
+                Debug.WriteLine($"[ImageBuffer] Warning: AtlasId is 0 for '{fileName}' at index {itemOffset} (ItemId: {itemid}).");
+                // Log all coordinates
+                Debug.WriteLine($"[ImageBuffer] Coordinates are: X={spriteCoords[0]}, Y={spriteCoords[1]}, W={spriteCoords[2]}, H={spriteCoords[3]}");
+                //return null;
             }
 
-            return GetSpriteInternal(spriteCoords, atlasId, fileName, itemOffset);
+            return GetSpriteInternal(spriteCoords, atlasId, fileName, itemOffset, itemid);
         }
 
-        private static Image<Rgba32>? GetSpriteInternal(int[] coords, int atlasId, string fileName, int itemOffset)
+        private static Image<Rgba32>? GetSpriteInternal(int[] coords, int atlasId, string fileName, int itemOffset, int itemid)
         {
             if (coords.Length < 4) return null;
+            atlasId--;
+            if (atlasId == 0) atlasId = 3;
 
-            int atlasFileIndex = atlasId - 1;
-            if (atlasFileIndex < 0 || atlasFileIndex >= spriteSheets.Length) return null;
+            if (atlasId < 0 || atlasId >= spriteSheets.Length) return null;
 
-            if (bigImages[atlasFileIndex] == null)
+            if (bigImages[atlasId] == null)
             {
-                Debug.WriteLine($"[ImageBuffer] Atlas '{spriteSheets[atlasFileIndex]}' not loaded.");
+                Debug.WriteLine($"[ImageBuffer] Atlas '{spriteSheets[atlasId]}' not loaded (ItemId: {itemid}).");
                 return null;
             }
-
-            var img = bigImages[atlasFileIndex]!;
+            var img = bigImages[atlasId]!;
             var cropRect = new Rectangle(coords[0], coords[1], coords[2], coords[3]);
 
             // Validate/clamp
@@ -132,40 +137,36 @@ namespace RotMGAssetExtractor.Flatc
             if (cropRect.Right > img.Width || cropRect.Bottom > img.Height ||
                 cropRect.X < 0 || cropRect.Y < 0)
             {
-                Debug.WriteLine($"[ImageBuffer] Warning: crop out of bounds for '{fileName}' at index {itemOffset}. " +
-                                $"AtlasId: {atlasFileIndex}, " +
+                Debug.WriteLine($"[ImageBuffer] Warning: crop out of bounds for '{fileName} {itemOffset}' (ItemId: {itemid}). " +
+                                $"AtlasId: {atlasId}, " +
                                 $"CropRect: {cropRect.X},{cropRect.Y},{cropRect.Width},{cropRect.Height}, " +
                                 $"ImageSize: {img.Width}x{img.Height}");
 
-                Debug.WriteLine("[ImageBuffer] Currently loaded atlases:");
-                for (int i = 0; i < bigImages.Length; i++)
-                {
-                    var atlasImage = bigImages[i];
-                    var atlasName = spriteSheets[i];
-                    var currentAtlasId = i + 1;
-                    if (atlasImage != null)
-                    {
-                        Debug.WriteLine($" - Name: {atlasName}, Size: {atlasImage.Width}x{atlasImage.Height}, AtlasId: {currentAtlasId}");
-                    }
-                    else
-                    {
-                        Debug.WriteLine($" - Name: {atlasName}, Not loaded, AtlasId: {currentAtlasId}");
-                    }
-                }
+                //Debug.WriteLine("[ImageBuffer] Currently loaded atlases:");
+                //for (int i = 0; i < bigImages.Length; i++)
+                //{
+                //    var atlasImage = bigImages[i];
+                //    var atlasName = spriteSheets[i];
+                //    var currentAtlasId = i + 1;
+                //    if (atlasImage != null)
+                //    {
+                //        Debug.WriteLine($" - Name: {atlasName}, Size: {atlasImage.Width}x{atlasImage.Height}, AtlasId: {currentAtlasId}");
+                //    }
+                //    else
+                //    {
+                //        Debug.WriteLine($" - Name: {atlasName}, Not loaded, AtlasId: {currentAtlasId}");
+                //    }
+                //}
                 return null;
             }
 
             try { return img.Clone(c => c.Crop(cropRect)); }
             catch (Exception ex)
             {
-                Debug.WriteLine("[ImageBuffer] Crop error: " + ex.Message);
+                Debug.WriteLine($"[ImageBuffer] Crop error: {ex.Message} (ItemId: {itemid})");
                 return null;
             }
         }
-
-
-        private static Image<Rgba32> CropImage(Image<Rgba32> source, Rectangle cropRect)
-            => source.Clone(ctx => ctx.Crop(cropRect));
 
         private static Image<Rgba32> EmptyImage()
         {
