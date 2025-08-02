@@ -5,7 +5,7 @@
         public static readonly string[] NonXmlFiles = {
             "manifest_xml", "COPYING", "Errors", "ExplainUnzip", "cloth_bazaar", "Cursors", "Dialogs", "Keyboard",
             "LICENSE", "LineBreaking Following Characters", "LineBreaking Leading Characters", "manifest_json", "spritesheetf",
-            "iso_4217", "data", "manifest", "BillingMode"
+            "iso_4217", "data", "manifest", "BillingMode", "PerformanceTestRunInfo", "PerformanceTestRunSettings"
         };
 
         private DataReader reader;

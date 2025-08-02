@@ -10,14 +10,12 @@ namespace RotMGAssetExtractor.UnityExtractor.resextractor
         public string Name { get; private set; }
         public string Path { get; private set; }
 
-        public bool DownscaleFallback { get; private set; }
         public bool IsAlphaChannelOptional { get; private set; }
         public bool IsReadable { get; private set; }
         public bool IsPreProcessed { get; private set; }
         public bool IgnoreMasterTextureLimit { get; private set; }
         public bool StreamingMipmaps { get; private set; }
 
-        public int ForcedFallbackFormat { get; private set; }
         public int Width { get; private set; }
         public int Height { get; private set; }
         public int CompleteImageSize { get; private set; }
@@ -81,8 +79,6 @@ namespace RotMGAssetExtractor.UnityExtractor.resextractor
 
             Name = reader.ReadAlignedString();
 
-            ForcedFallbackFormat = reader.ReadInt();
-            DownscaleFallback = reader.ReadBoolean();
             IsAlphaChannelOptional = reader.ReadBoolean();
             reader.AlignStream();
 
@@ -170,9 +166,7 @@ namespace RotMGAssetExtractor.UnityExtractor.resextractor
             sb.Append($", WrapW: {WrapW}");
             sb.Append($", LightmapFormat: {LightmapFormat}");
             sb.Append($", ColorSpace: {ColorSpace}");
-            sb.Append($", DownscaleFallback: {DownscaleFallback}");
             sb.Append($", IsAlphaChannelOptional: {IsAlphaChannelOptional}");
-            sb.Append($", ForcedFallbackFormat: {ForcedFallbackFormat}");
             sb.Append($", CompleteImageSize: {CompleteImageSize}");
             sb.Append($", MipsStripped: {MipsStripped}");
             sb.Append($", ImageCount: {ImageCount}");

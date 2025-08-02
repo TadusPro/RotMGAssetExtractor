@@ -264,8 +264,15 @@ namespace RotMGAssetExtractor.Parser
             {
                 if (TextAsset.NonXmlFiles.Contains(ta.Name))
                     continue;
-                using var ms = new MemoryStream(ta.Script);
-                ParseAssetXmlToModels(ms);
+                try
+                {
+                    using var ms = new MemoryStream(ta.Script);
+                    ParseAssetXmlToModels(ms);
+                }
+                catch (System.Xml.XmlException)
+                {
+                    Debug.WriteLine($"[Warning] Failed to parse XML for TextAsset: {ta.Name}. Skipping.");
+                }
             }
         }
 
