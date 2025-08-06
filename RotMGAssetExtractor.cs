@@ -323,7 +323,7 @@ namespace RotMGAssetExtractor
                 SpriteFlatBuffer.Reload();
             }
 
-            //unityExtractor.UnusedNodesDebug();
+            unityExtractor.UnusedNodesDebug();
 
             GC.Collect();
 
