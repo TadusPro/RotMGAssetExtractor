@@ -29,44 +29,51 @@ namespace RotMGAssetExtractor.Parser
             var match = Regex.Matches(text, @"\b\d+\.\d+\.\d+\.\d+\.\d+\b");
             return match.Count == 1 ? match[0].Value : throw new InvalidOperationException("Version not found / multiple found");
         }
+
         public Resources ProccessResource(string name, byte[] assetsData, byte[]? resSData = null)
         {
-            // hook “child-node” warning stores
             unusedAttrByNodeStatic = unusedAttrByNode;
             unusedChildByNodeStatic = unusedChildByNode;
+
             var res = new Resources(assetsData, resSData);
             var sb = new StringBuilder("[GameData] Processing ").Append(name);
 
-            var types = RotMGAssetExtractor.ExtractionTypes;
+            var sel = RotMGAssetExtractor.Selection;
 
-            if (types.Contains(ExtractionType.All) && res.assetSpriteAtlases.Any())
-            {
+            if (sel.WantsSpritesheet && res.assetSpriteAtlases.Any())
                 sb.Append(" | SpriteAtlases: ").Append(res.assetSpriteAtlases.Count);
-            }
-
-            if ((types.Contains(ExtractionType.All) || types.Contains(ExtractionType.ImagesLight) || types.Contains(ExtractionType.ImagesAll)) && res.assetTexture2Ds.Any())
-            {
+            if (sel.WantsImages && res.assetTexture2Ds.Any())
                 sb.Append(" | Texture2Ds: ").Append(res.assetTexture2Ds.Count);
+            if (sel.WantsModels && res.assetTextAssets.Any())
+                sb.Append(" | TextAssets: ").Append(res.assetTextAssets.Count);
+            if (sel.WantsSpritesheet && res.spritesheet != null)
+                sb.Append(" | Spritesheet: ").Append(res.spritesheet.Name);
+
+            // Record texture origins
+            if (sel.WantsImages && res.assetTexture2Ds.Count > 0)
+            {
+                foreach (var tex in res.assetTexture2Ds)
+                    AssetOriginRegistry.RecordTexture(tex.PathId, tex.Name, name);
             }
 
-            if ((types.Contains(ExtractionType.All) || types.Contains(ExtractionType.Models)) && res.assetTextAssets.Any())
+            // Record text asset origins (for models)
+            if (sel.WantsModels && res.assetTextAssets.Count > 0)
             {
-                sb.Append(" | TextAssets: ").Append(res.assetTextAssets.Count);
+                foreach (var ta in res.assetTextAssets)
+                    AssetOriginRegistry.RecordTextAsset(ta.Name, name);
             }
-            if (types.Contains(ExtractionType.All) && res.spritesheet != null)
-            {
-                sb.Append(" | Spritesheet: ").Append(res.spritesheet.Name);
-            }
+
             Debug.WriteLine(sb.ToString());
             return res;
         }
 
+        internal NodeDiagnostics GetNodeDiagnostics() =>
+            new NodeDiagnostics(unrecognizedElementCounts, unusedAttrByNode, unusedChildByNode);
+
+        // Optional legacy wrapper (can remove if no longer called)
         internal void UnusedNodesDebug()
         {
-            // summary diagnostics
-            PrintCounts("Unknown nodes", unrecognizedElementCounts);
-            PrintNestedCounts("Unused attributes per node", unusedAttrByNode, "@");
-            PrintNestedCounts("Unused child elements per node", unusedChildByNode, "<", ">");
+            AssetOriginRegistry.LogNodeDiagnostics(GetNodeDiagnostics());
         }
 
         private static void PrintCounts(string header, Dictionary<string, int> counts, string prefix = "", string suffix = "")
@@ -88,18 +95,47 @@ namespace RotMGAssetExtractor.Parser
                     Debug.WriteLine($"    {prefix}{name}{suffix}: {cnt}");
             }
         }
-        public void ParseAssetXmlToModels(Stream xml)
+
+        public void LoadXmlTextAssets(IEnumerable<Resources> resources)
+        {
+            var allTextAssets = resources.SelectMany(r => r.assetTextAssets.Select(ta => ta));
+            var count = allTextAssets.Count();
+            if (count > 0)
+                Debug.WriteLine("[GameData] Processing " + count + " TextAssets");
+
+            foreach (var ta in allTextAssets)
+            {
+                if (TextAsset.NonXmlFiles.Contains(ta.Name))
+                    continue;
+                try
+                {
+                    using var ms = new MemoryStream(ta.Script);
+
+                    // Lookup previously recorded origin (from ProccessResource -> RecordTextAsset)
+                    var origin = AssetOriginRegistry.GetTextureAssetFor(ta.Name) // may be null if name collides
+                                 ?? "unknown"; // fallback
+
+                    ParseAssetXmlToModels(ms, origin, ta.Name);
+                }
+                catch (System.Xml.XmlException)
+                {
+                    Debug.WriteLine($"[Warning] Failed to parse XML for TextAsset: {ta.Name}. Skipping.");
+                }
+            }
+        }
+
+        // Replaces old single-parameter version
+        public void ParseAssetXmlToModels(Stream xml, string assetFileName, string textAssetName)
         {
             var xdoc = XDocument.Load(xml);
             var modelTypes = typeof(ModelObject).Assembly.GetTypes()
-                                .Where(t => t.Namespace == "RotMGAssetExtractor.Model")
-                                .ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+                .Where(t => t.Namespace == "RotMGAssetExtractor.Model")
+                .ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
 
             foreach (var el in xdoc.Root.Elements())
             {
                 var typeName = el.Element("Class")?.Value?.Trim();
                 if (string.IsNullOrEmpty(typeName)) typeName = el.Name.LocalName;
-
 
                 if (modelTypes.TryGetValue(typeName, out var targetType))
                 {
@@ -114,6 +150,8 @@ namespace RotMGAssetExtractor.Parser
                         RotMGAssetExtractor.BuildModelsByType[typeName] = list;
                     }
                     list.Add(obj!);
+
+                    AssetOriginRegistry.RecordModelInstance(typeName, obj!, assetFileName);
                 }
                 else
                 {
@@ -132,7 +170,6 @@ namespace RotMGAssetExtractor.Parser
 
             foreach (var p in props)
             {
-                /* figure out the XML tag / attr name -------------------------------- */
                 var xmlAttr = p.GetCustomAttribute<XmlAttributeAttribute>();
                 var xmlElem = p.GetCustomAttribute<XmlElementAttribute>();
                 var xmlTxt = p.GetCustomAttribute<XmlTextAttribute>() != null;
@@ -141,38 +178,36 @@ namespace RotMGAssetExtractor.Parser
                        ?? xmlElem?.ElementName
                        ?? p.Name;
 
-                /* ----- ARRAY-OF-OBJECTS  (e.g. LevelIncrease[]) -------------------- */
+                // array of objects
                 if (p.PropertyType.IsArray &&
                     p.PropertyType.GetElementType()!.IsClass &&
                     p.PropertyType != typeof(string[]))
                 {
                     var elemType = p.PropertyType.GetElementType()!;
                     var items = el.Elements(name)
-                                  .Select(c => typeof(UnityExtractor)
-                                      .GetMethod(nameof(MapXmlElementToObject),
-                                                 BindingFlags.NonPublic | BindingFlags.Static)!
-                                      .MakeGenericMethod(elemType)
-                                      .Invoke(null, new object[] { c }))
-                                  .ToArray();
+                        .Select(c => typeof(UnityExtractor)
+                            .GetMethod(nameof(MapXmlElementToObject),
+                                BindingFlags.NonPublic | BindingFlags.Static)!
+                            .MakeGenericMethod(elemType)
+                            .Invoke(null, new object[] { c }))
+                        .ToArray();
 
                     var arr = Array.CreateInstance(elemType, items.Length);
                     for (int i = 0; i < items.Length; i++) arr.SetValue(items[i], i);
 
                     p.SetValue(obj, arr);
                     if (items.Length > 0) used.Add(name);
-                    continue;                   // skip the scalar switch
+                    continue;
                 }
 
-                /* lookup (case-insensitive) ----------------------------------------- */
                 var attr = el.Attributes()
-                              .FirstOrDefault(a => a.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    .FirstOrDefault(a => a.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase));
                 var child = el.Elements()
-                              .FirstOrDefault(c => c.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    .FirstOrDefault(c => c.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase));
 
                 string? raw = xmlTxt ? el.Value : attr?.Value ?? child?.Value;
                 if (raw == null && child == null && !xmlTxt) continue;
 
-                /* scalar / nested-object mapping ------------------------------------ */
                 object val = p.PropertyType switch
                 {
                     Type t when t == typeof(bool) =>
@@ -182,26 +217,23 @@ namespace RotMGAssetExtractor.Parser
                         string.IsNullOrWhiteSpace(raw)
                             ? Array.Empty<int>()
                             : raw.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(int.Parse).ToArray(),
+                                .Select(int.Parse).ToArray(),
 
                     Type t when t == typeof(int) =>
                         raw != null && raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
                             ? Convert.ToInt32(raw, 16)
-                            : int.TryParse(raw, NumberStyles.Integer,
-                                           CultureInfo.InvariantCulture, out var i) ? i : 0,
+                            : int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i : 0,
 
                     Type t when t == typeof(double) =>
-                        double.TryParse(raw, NumberStyles.Float,
-                                        CultureInfo.InvariantCulture, out var d) ? d : 0d,
+                        double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : 0d,
 
                     Type t when t == typeof(float) =>
-                        float.TryParse(raw, NumberStyles.Float,
-                                       CultureInfo.InvariantCulture, out var f) ? f : 0f,
+                        float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : 0f,
 
                     _ when p.PropertyType.IsClass && p.PropertyType != typeof(string) =>
                         typeof(UnityExtractor)
                             .GetMethod(nameof(MapXmlElementToObject),
-                                       BindingFlags.NonPublic | BindingFlags.Static)!
+                                BindingFlags.NonPublic | BindingFlags.Static)!
                             .MakeGenericMethod(p.PropertyType)
                             .Invoke(null, new object[] { child ?? el })!,
 
@@ -212,28 +244,24 @@ namespace RotMGAssetExtractor.Parser
                 used.Add(xmlTxt ? "#text" : name);
             }
 
-            /* unused attributes / children ----------------------------------------- */
             foreach (var a in el.Attributes())
                 if (!used.Contains(a.Name.LocalName))
-                    IncrementNestedStatic(unusedAttrByNodeStatic,
-                                          typeof(T).Name, a.Name.LocalName);
+                    IncrementNestedStatic(unusedAttrByNodeStatic, typeof(T).Name, a.Name.LocalName);
 
             foreach (var c in el.Elements())
                 if (!used.Contains(c.Name.LocalName))
-                    IncrementNestedStatic(unusedChildByNodeStatic,
-                                          typeof(T).Name, c.Name.LocalName);
+                    IncrementNestedStatic(unusedChildByNodeStatic, typeof(T).Name, c.Name.LocalName);
 
             return obj;
         }
 
-
-        // these are only used inside static mapper; they proxy to outer instance via lazy re‑attach in RunExtractionPipeline.
+        // static tracking for mapper
         private static Dictionary<string, Dictionary<string, int>> unusedAttrByNodeStatic;
         private static Dictionary<string, Dictionary<string, int>> unusedChildByNodeStatic;
 
         static void IncrementNestedStatic(Dictionary<string, Dictionary<string, int>> dict, string parent, string key)
         {
-            if (dict == null) return; // instance not set yet
+            if (dict == null) return;
             if (!dict.TryGetValue(parent, out var inner))
             {
                 inner = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -241,40 +269,9 @@ namespace RotMGAssetExtractor.Parser
             }
             inner[key] = inner.TryGetValue(key, out var v) ? v + 1 : 1;
         }
+
         private static void Increment(Dictionary<string, int> dict, string key) =>
             dict[key] = dict.TryGetValue(key, out var v) ? v + 1 : 1;
-
-        private static void IncrementNested(Dictionary<string, Dictionary<string, int>> dict, string parent, string key)
-        {
-            if (!dict.TryGetValue(parent, out var inner))
-            {
-                inner = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                dict[parent] = inner;
-            }
-            inner[key] = inner.TryGetValue(key, out var v) ? v + 1 : 1;
-        }
-        public void LoadXmlTextAssets(IEnumerable<Resources> resources)
-        {
-            var allTextAssets = resources.SelectMany(r => r.assetTextAssets);
-            if (allTextAssets.Any())
-            {
-                Debug.WriteLine("[GameData] Processing " + allTextAssets.Count() + " TextAssets");
-            }
-            foreach (var ta in allTextAssets)
-            {
-                if (TextAsset.NonXmlFiles.Contains(ta.Name))
-                    continue;
-                try
-                {
-                    using var ms = new MemoryStream(ta.Script);
-                    ParseAssetXmlToModels(ms);
-                }
-                catch (System.Xml.XmlException)
-                {
-                    Debug.WriteLine($"[Warning] Failed to parse XML for TextAsset: {ta.Name}. Skipping.");
-                }
-            }
-        }
 
         public void ExportSpritesheet(IEnumerable<Resources> resources)
         {
@@ -288,32 +285,46 @@ namespace RotMGAssetExtractor.Parser
 
         public void ExportAllTexturesAsPng(IEnumerable<Resources> resources)
         {
-            var allTextures = resources.SelectMany(r => r.assetTexture2Ds).ToList();
+            var sel = RotMGAssetExtractor.Selection;
 
-            Debug.WriteLine($"[Debug] Found {allTextures.Count} total Texture2D assets.");
-            // expetion here? System.ArgumentException: 'An item with the same key has already been added. Key: 3'
+            var allTextures = resources.SelectMany(r => r.assetTexture2Ds).ToList();
+            Debug.WriteLine($"[Debug] Found {allTextures.Count} Texture2D assets in scanned files.");
+
+            bool filteringActive =
+                !sel.AllImagesRequested &&
+                (sel.ImageNames.Count > 0 || sel.KnownImages.Count > 0);
+
+            HashSet<string>? allowedNames = null;
+            if (filteringActive)
+            {
+                allowedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var n in sel.ImageNames)
+                    allowedNames.Add(System.IO.Path.GetFileNameWithoutExtension(n));
+                foreach (var ki in sel.KnownImages)
+                    allowedNames.Add(KnownImageMap.Map[ki].TextureName);
+            }
+
             var textureMap = allTextures
                 .GroupBy(t => t.PathId)
-                .ToDictionary(g => g.Key, g => g.First());
+                .Select(g => g.First())
+                .ToList();
 
             var decoder = new BcDecoder();
-            
             int processedCount = 0;
-            foreach (var tex in allTextures)
+            int skippedByFilter = 0;
+            int skippedUnsupported = 0;
+
+            foreach (var tex in textureMap)
             {
-
-                //[Debug] Processing texture 'characters_masks' which is a known sprite sheet.
-                //[GameData] Storing texture: characters_masks.png
-
-                //Debug.WriteLine($"[Debug] Processing texture '{tex.Name}' with pathid '{tex.PathId}'which is a known sprite sheet.");
-                if(tex.Name == "characters_masks" || tex.Name == "mapObjects")
+                if (filteringActive && allowedNames != null && !allowedNames.Contains(tex.Name))
                 {
-                    Debug.WriteLine(tex);
+                    skippedByFilter++;
+                    continue;
                 }
 
                 if (!AdvancedImaging.TryConvertTextureToBgra32(tex, decoder, out var bgra))
                 {
-                    //Debug.WriteLine($"[Warning] SKIPPING {tex.Name} (unsupported format: {tex.TextureFormat})");
+                    skippedUnsupported++;
                     continue;
                 }
 
@@ -324,12 +335,17 @@ namespace RotMGAssetExtractor.Parser
                 img.Save(ms, new PngEncoder());
                 var png = ms.ToArray();
 
-                string name = $"{tex.Name}.png";
-                Debug.WriteLine("[GameData] Storing texture: " + name);
-                RotMGAssetExtractor.BuildImages[name] = png;
+                RotMGAssetExtractor.BuildImages[$"{tex.Name}.png"] = png;
                 processedCount++;
             }
-            Debug.WriteLine($"[Debug] Finished exporting textures. Processed {processedCount} images.");
+
+            if (filteringActive)
+                Debug.WriteLine($"[Debug] Exported {processedCount} filtered textures. Skipped {skippedByFilter} by name, {skippedUnsupported} unsupported.");
+            else
+                Debug.WriteLine($"[Debug] Exported {processedCount} textures (no filtering). Skipped {skippedUnsupported} unsupported.");
+
+            // Suggest mappings for any unknown requested names
+            TextureOriginRegistry.LogSuggestionsForUnknownImages(sel);
         }
     }
 }

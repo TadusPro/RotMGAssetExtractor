@@ -16,41 +16,50 @@ namespace RotMGAssetExtractor
         private const string ModelsDirectoryName = "models";
         private const string SpritesheetFileName = "spritesheet.xml";
 
-
         public static string BuildHash { get; set; } = "";
         public static string BuildVersion { get; set; } = "";
         public static Dictionary<string, List<object>> BuildModelsByType { get; } = new(StringComparer.OrdinalIgnoreCase);
-        public static Dictionary<string, byte[]> BuildImages { get; } = new Dictionary<string, byte[]>();
-        public static byte[] BuildSpritesheetf = new byte[0];
-        internal static ExtractionType[] ExtractionTypes { get; set; } = Array.Empty<ExtractionType>();
+        public static Dictionary<string, byte[]> BuildImages { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public static byte[] BuildSpritesheetf = Array.Empty<byte>();
+        internal static ExtractionSelection Selection { get; set; } = new();
 
-        public static Task InitAsync(string basePath)
+        // Backward style "all" initializer (now just uses Selection)
+        public static Task InitAsync(string basePath) =>
+            InitAsync(basePath, ExtractionSelection.All());
+
+        public static async Task InitAsync(string basePath, ExtractionSelection selection)
         {
-            return InitAsync(basePath, ExtractionType.All);
+            return InitInternalAsync(basePath, selection ?? throw new ArgumentNullException(nameof(selection)));
         }
-        public static async Task InitAsync(string basePath, params ExtractionType[] extractionTypes)
+
+        private static async Task InitInternalAsync(string basePath, ExtractionSelection selection)
         {
-            ExtractionTypes = extractionTypes;
+            Selection = selection;
             CacheDirectory = Path.Combine(basePath, "GameData");
             var downloader = new Downloading.Downloader();
             var (_, fetchedBuildHash) = await downloader.FetchBuildInfoAsync();
-
             if (string.IsNullOrEmpty(fetchedBuildHash))
                 throw new Exception("Failed to fetch build information.");
-
             BuildHash = fetchedBuildHash;
+
+            // Always fetch version (cheap): skip cache mismatch issues
+            // (If you want to allow disabling, add optional flag later.)
+            // Cache load first (needs BuildHash set)
             if (await LoadCacheAsync())
             {
+                ApplySelectionFilters();
                 await ImageBuffer.LoadAllAtlasesAsync();
-                Debug.WriteLine("[GameData] Initialized from cache.");
-                return;
+                Debug.WriteLine("[GameData] Initialized from cache (filtered).");
             }
-
-            Debug.WriteLine("[GameData] Downloading new gamedata.");
-            await DownloadAll(downloader);
-            await SaveCacheAsync();
-            await ImageBuffer.LoadAllAtlasesAsync();
-            Debug.WriteLine("[GameData] Initialized.");
+            else
+            {
+                Debug.WriteLine("[GameData] Downloading new gamedata.");
+                await DownloadAll(new Downloading.Downloader());
+                ApplySelectionFilters();
+                await SaveCacheAsync();
+                await ImageBuffer.LoadAllAtlasesAsync();
+                Debug.WriteLine("[GameData] Initialized.");
+            }
         }
 
         private static async Task<bool> LoadCacheAsync()
@@ -58,306 +67,301 @@ namespace RotMGAssetExtractor
             var metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
             if (!File.Exists(metadataPath))
                 return false;
-
             try
             {
                 var serializer = new XmlSerializer(typeof(AssetCache));
                 using var stream = new FileStream(metadataPath, FileMode.Open);
                 var cache = (AssetCache?)serializer.Deserialize(stream);
-
                 if (cache == null || cache.BuildHash != BuildHash)
                     return false;
 
                 BuildVersion = cache.BuildVersion;
 
-                // Images
                 BuildImages.Clear();
-                var imagesPath = Path.Combine(CacheDirectory, ImagesDirectoryName);
-                if (Directory.Exists(imagesPath))
+                if (Selection.WantsImages)
                 {
-                    foreach (var file in Directory.GetFiles(imagesPath))
-                    {
-                        var fileName = Path.GetFileName(file);
-                        BuildImages[fileName] = await File.ReadAllBytesAsync(file);
-                    }
+                    var imagesPath = Path.Combine(CacheDirectory, ImagesDirectoryName);
+                    if (Directory.Exists(imagesPath))
+                        foreach (var file in Directory.GetFiles(imagesPath))
+                            BuildImages[Path.GetFileName(file)] = await File.ReadAllBytesAsync(file);
                 }
 
-                // Spritesheet
-                if (!TryLoadSpritesheet(Path.Combine(CacheDirectory, SpritesheetFileName)))
-                    return false;
-
-                // Models
                 BuildModelsByType.Clear();
-                var modelsPath = Path.Combine(CacheDirectory, ModelsDirectoryName);
-                if (Directory.Exists(modelsPath))
+                if (Selection.WantsModels)
                 {
-                    var modelTypes = Assembly.GetExecutingAssembly().GetTypes()
-                        .Where(t => t.Namespace == "RotMGAssetExtractor.Model" && !t.IsAbstract).ToArray();
-
-                    foreach (var file in Directory.GetFiles(modelsPath, "*.xml"))
+                    var modelsPath = Path.Combine(CacheDirectory, ModelsDirectoryName);
+                    if (Directory.Exists(modelsPath))
                     {
-                        var typeName = Path.GetFileNameWithoutExtension(file);
-                        var modelType = modelTypes.FirstOrDefault(t => t.Name == typeName);
-                        if (modelType != null)
+                        var modelTypes = Assembly.GetExecutingAssembly().GetTypes()
+                            .Where(t => t.Namespace == "RotMGAssetExtractor.Model" && !t.IsAbstract).ToArray();
+                        foreach (var file in Directory.GetFiles(modelsPath, "*.xml"))
                         {
+                            var typeName = Path.GetFileNameWithoutExtension(file);
+                            var modelType = modelTypes.FirstOrDefault(t => t.Name == typeName);
+                            if (modelType == null) continue;
                             var listType = typeof(List<>).MakeGenericType(modelType);
-                            var modelSerializer = new XmlSerializer(listType);
+                            var ser = new XmlSerializer(listType);
                             using var modelStream = new FileStream(file, FileMode.Open);
-                            var models = (IList)modelSerializer.Deserialize(modelStream);
-                            if (models != null)
-                                BuildModelsByType[typeName] = models.Cast<object>().ToList();
+                            if (ser.Deserialize(modelStream) is IList list)
+                                BuildModelsByType[typeName] = list.Cast<object>().ToList();
                         }
                     }
                 }
 
+                if (Selection.WantsSpritesheet)
+                {
+                    if (!TryLoadSpritesheet(Path.Combine(CacheDirectory, SpritesheetFileName)))
+                        return false;
+                }
                 return true;
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Error loading cache: {ex.Message}");
+                Debug.WriteLine($"[GameData] Error loading cache: {ex.Message}");
                 return false;
             }
         }
 
-
         private static async Task SaveCacheAsync()
         {
             Directory.CreateDirectory(CacheDirectory);
-            var imagesPath = Path.Combine(CacheDirectory, ImagesDirectoryName);
-            Directory.CreateDirectory(imagesPath);
-            var modelsPath = Path.Combine(CacheDirectory, ModelsDirectoryName);
-            Directory.CreateDirectory(modelsPath);
 
-            // Metadata
             var cache = new AssetCache { BuildHash = BuildHash, BuildVersion = BuildVersion };
-            var metaSerializer = new XmlSerializer(typeof(AssetCache));
+            var ser = new XmlSerializer(typeof(AssetCache));
             using (var fs = File.Create(Path.Combine(CacheDirectory, MetadataFileName)))
-                metaSerializer.Serialize(fs, cache);
+                ser.Serialize(fs, cache);
 
-            // Images
-            foreach (var entry in BuildImages)
+            if (Selection.WantsImages && BuildImages.Count > 0)
             {
-                var imagePath = Path.Combine(imagesPath, entry.Key);
-                Directory.CreateDirectory(Path.GetDirectoryName(imagePath)!);
-                await File.WriteAllBytesAsync(imagePath, entry.Value);
+                var imagesDir = Path.Combine(CacheDirectory, ImagesDirectoryName);
+                Directory.CreateDirectory(imagesDir);
+                foreach (var kv in BuildImages)
+                {
+                    var path = Path.Combine(imagesDir, kv.Key);
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    await File.WriteAllBytesAsync(path, kv.Value);
+                }
             }
 
-            // Spritesheet (sync serialize)
-            WriteSpritesheet(Path.Combine(CacheDirectory, SpritesheetFileName));
+            if (Selection.WantsModels && BuildModelsByType.Count > 0)
+            {
+                var modelsDir = Path.Combine(CacheDirectory, ModelsDirectoryName);
+                Directory.CreateDirectory(modelsDir);
+                SaveModels(modelsDir);
+            }
 
-            // Models (sync serialize)
-            SaveModels(modelsPath);
+            if (Selection.WantsSpritesheet)
+                WriteSpritesheet(Path.Combine(CacheDirectory, SpritesheetFileName));
 
             Debug.WriteLine("[GameData] Cache saved.");
         }
-
-        private static string Clean(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return string.Empty;
-            var sb = new StringBuilder(s.Length);
-            foreach (var ch in s)
-                if (ch == '\t' || ch == '\n' || ch == '\r' || ch >= 0x20)
-                    sb.Append(ch); // keep valid XML chars
-            return sb.ToString();
-        }
-
-        private static void WriteSpritesheet(string path)
-        {
-            var decompiled = new DecompiledSpriteSheet();
-            var spriteGroups = SpriteFlatBuffer.GetSprites();
-
-            foreach (var group in spriteGroups)
-            {
-                var cleanedGroupName = Clean(group.Key);
-                var sg = new SpriteGroup { Name = cleanedGroupName };
-
-                foreach (var s in group.Value)
-                {
-                    var spriteInfo = new SpriteInfo
-                    {
-                        Index = s.Key,
-                        AtlasId = s.Value.AtlasId,
-                        X = s.Value.Coords[0],
-                        Y = s.Value.Coords[1],
-                        W = s.Value.Coords[2],
-                        H = s.Value.Coords[3]
-                    };
-                    sg.Sprites.Add(spriteInfo);
-                }
-                decompiled.SpriteGroups.Add(sg);
-            }
-            int count = 0;
-            foreach (var group in decompiled.SpriteGroups)
-                foreach (var sprite in group.Sprites)
-                    count++;
-
-            var ser = new XmlSerializer(typeof(DecompiledSpriteSheet));
-
-            try
-            {
-                using var fs = File.Create(path);
-                ser.Serialize(fs, decompiled);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[GameData] ERROR: An exception occurred during serialization: {ex}");
-                throw; // Re-throw the exception to not hide the error
-            }
-        }
-
-
 
         private static void SaveModels(string modelsPath)
         {
             var modelTypes = Assembly.GetExecutingAssembly().GetTypes()
                 .Where(t => t.Namespace == "RotMGAssetExtractor.Model" && !t.IsAbstract).ToArray();
-
             foreach (var entry in BuildModelsByType)
             {
                 var modelType = modelTypes.FirstOrDefault(t => t.Name == entry.Key);
                 if (modelType == null) continue;
-
                 var listType = typeof(List<>).MakeGenericType(modelType);
                 var typedList = (IList)Activator.CreateInstance(listType)!;
                 foreach (var item in entry.Value) typedList.Add(item);
-
                 var ser = new XmlSerializer(listType);
                 using var fs = File.Create(Path.Combine(modelsPath, $"{entry.Key}.xml"));
                 ser.Serialize(fs, typedList);
             }
         }
 
-
         internal static async Task DownloadAll(Downloading.Downloader downloader)
         {
             var unityExtractor = new Parser.UnityExtractor();
 
-            // Process build info and file list as before.
             var (baseCdnUrl, fetchedBuildHash) = await downloader.FetchBuildInfoAsync();
             if (string.IsNullOrEmpty(baseCdnUrl) || string.IsNullOrEmpty(fetchedBuildHash))
-            {
                 throw new Exception("Failed to fetch build information.");
-            }
-            // Save the fetched build hash in the public property.
             BuildHash = fetchedBuildHash;
 
-            var fileList = await downloader.FetchFileListAsync(baseCdnUrl, BuildHash);
-            if (fileList is null || fileList.Count == 0)
+            var fileList = await downloader.FetchFileListAsync(baseCdnUrl, BuildHash)
+                          ?? throw new Exception("No files found.");
+            if (fileList.Count == 0) throw new Exception("No files found.");
+
+            // Always obtain version
+            var meta = fileList.FirstOrDefault(f => f.file == "global-metadata.dat");
+            if (meta != null)
             {
-                throw new Exception("No files found.");
+                var data = await downloader.DownloadAndDecompressFileAsync(meta.url);
+                BuildVersion = unityExtractor.GetUnityVersionFromMetadata(data);
+                fileList.Remove(meta);
             }
 
-            // Global metadata extraction // if extractiontype all or gameversion is set
-            if (ExtractionTypes.Contains(ExtractionType.GameVersion) && ExtractionTypes.Contains(ExtractionType.All))
+            if (!Selection.RequiresResourcesAssets)
             {
-                var meta = fileList.FirstOrDefault(f => f.file == "global-metadata.dat");
-                if (meta != null)
-                {
-                    var data = await downloader.DownloadAndDecompressFileAsync(meta.url);
-                    BuildVersion = unityExtractor.GetUnityVersionFromMetadata(data);
-                    fileList.Remove(meta);
-                }
-            }
-            
-
-            // Download and process each relevant resource file
-            var processedResources = new List<Resources>();
-            var assetFiles = fileList.Where(f => f.file.EndsWith(".assets")).ToList();
-            var resSFiles = fileList.Where(f => f.file.EndsWith(".resS"))
-                                    .ToDictionary(f => f.file, f => f);
-
-
-            if (ExtractionTypes.Contains(ExtractionType.All) || 
-                ExtractionTypes.Contains(ExtractionType.Models) || 
-                ExtractionTypes.Contains(ExtractionType.Spritesheet) || 
-                ExtractionTypes.Contains(ExtractionType.ImagesLight) || 
-                ExtractionTypes.Contains(ExtractionType.ImagesLight))
-            {
-                // inside here, only download and process the file "resources.assets" nothing more
-                var assetFiles2 = assetFiles.Where(f => f.file == "resources.assets").ToList();
-                if (assetFiles2.Count == 0)
-                {
-                    throw new Exception("No resources.assets file found in the file list.");
-                }
-                var assetData = await downloader.DownloadAndDecompressFileAsync(assetFiles2.FirstOrDefault().url);
-                processedResources.Add(unityExtractor.ProccessResource("resources.assets", assetData));
-
+                Debug.WriteLine("[GameData] Only version requested.");
+                return;
             }
 
-            if (ExtractionTypes.Contains(ExtractionType.All))
+            bool imageFallbackNeeded = false;
+
+            // Determine targeting (images only & fully mapped)
+            bool onlyImages = Selection.WantsImages && !Selection.WantsModels && !Selection.WantsSpritesheet;
+            HashSet<string>? targetedAssets = null;
+            bool canTarget = false;
+
+            if (onlyImages)
             {
-                // inside here skip the file "resources.assets" and process all other asset files remove it from the list
-                assetFiles = assetFiles.Where(f => f.file != "resources.assets").ToList();
+                targetedAssets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                foreach (var assetFile in assetFiles)
+                foreach (var ki in Selection.KnownImages)
+                    targetedAssets.Add(KnownImageMap.Map[ki].AssetFile);
+
+                foreach (var name in Selection.ImageNames)
                 {
-                    var assetData = await downloader.DownloadAndDecompressFileAsync(assetFile.url);
-                    byte[]? resSData = null;
-
-                    // The corresponding .resS file has the same name but with a .resS extension
-                    var resSFileName = Path.ChangeExtension(assetFile.file, ".resS");
-                    if (resSFiles.TryGetValue(resSFileName, out var resSFile))
+                    if (KnownImageMap.TryGetByTextureName(Path.GetFileNameWithoutExtension(name), out var resolved))
+                        targetedAssets.Add(resolved.info.AssetFile);
+                    else
                     {
-                        resSData = await downloader.DownloadAndDecompressFileAsync(resSFile.url);
+                        if (Selection.FallbackFullScanForUnknownImages)
+                        {
+                            imageFallbackNeeded = true;
+                            targetedAssets = null;
+                            break;
+                        }
                     }
-
-                    processedResources.Add(unityExtractor.ProccessResource(assetFile.file, assetData, resSData));
                 }
+
+                if (!imageFallbackNeeded && targetedAssets != null && targetedAssets.Count > 0)
+                    canTarget = true;
             }
 
-            
+            var processed = new List<Resources>();
+            var assetFiles = fileList.Where(f => f.file.EndsWith(".assets")).ToDictionary(f => f.file, f => f);
+            var resSFiles = fileList.Where(f => f.file.EndsWith(".resS")).ToDictionary(f => f.file, f => f);
 
-            // Now that all resources are parsed, perform the combined processing steps
-            if (ExtractionTypes.Contains(ExtractionType.ImagesLight) || ExtractionTypes.Contains(ExtractionType.ImagesAll) || ExtractionTypes.Contains(ExtractionType.All))
+            IEnumerable<string> assetsToDownload;
+            if (canTarget)
             {
-                unityExtractor.ExportAllTexturesAsPng(processedResources);
+                assetsToDownload = targetedAssets!;
+            }
+            else
+            {
+                // Base set always includes resources.assets for models or general
+                var list = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                list.Add("resources.assets");
 
+                if (Selection.RequiresFullScan(imageFallbackNeeded))
+                {
+                    foreach (var f in assetFiles.Keys)
+                        list.Add(f);
+                }
+                assetsToDownload = list;
             }
-            if (ExtractionTypes.Contains(ExtractionType.Models) || ExtractionTypes.Contains(ExtractionType.All))
+
+            foreach (var assetName in assetsToDownload)
             {
-                unityExtractor.LoadXmlTextAssets(processedResources);
+                if (!assetFiles.TryGetValue(assetName, out var entry))
+                {
+                    Debug.WriteLine($"[GameData] WARNING: Asset '{assetName}' missing.");
+                    continue;
+                }
+                var data = await downloader.DownloadAndDecompressFileAsync(entry.url);
+                byte[]? resSData = null;
+                var resSName = Path.ChangeExtension(assetName, ".resS");
+                if (resSFiles.TryGetValue(resSName, out var resS))
+                    resSData = await downloader.DownloadAndDecompressFileAsync(resS.url);
+                processed.Add(unityExtractor.ProccessResource(assetName, data, resSData));
             }
-            if (ExtractionTypes.Contains(ExtractionType.Spritesheet) || ExtractionTypes.Contains(ExtractionType.All))
+
+            if (Selection.WantsImages)
+                unityExtractor.ExportAllTexturesAsPng(processed);
+            if (Selection.WantsModels)
+                unityExtractor.LoadXmlTextAssets(processed);
+            if (Selection.WantsSpritesheet)
             {
-                unityExtractor.ExportSpritesheet(processedResources);
+                unityExtractor.ExportSpritesheet(processed);
                 SpriteFlatBuffer.Reload();
             }
 
-            unityExtractor.UnusedNodesDebug();
-
-            GC.Collect();
-
-            var summary = new StringBuilder("[GameData] Successfully parsed new assets.");
-            if (ExtractionTypes.Contains(ExtractionType.All) || ExtractionTypes.Contains(ExtractionType.ImagesLight) || ExtractionTypes.Contains(ExtractionType.ImagesAll))
+            var summary = new StringBuilder("[GameData] Parsed new assets.");
+            if (Selection.WantsImages) summary.Append($" Images: {BuildImages.Count}.");
+            if (Selection.WantsModels)
             {
-                summary.Append($" Images: {BuildImages.Count()}.");
+                int totalModels = BuildModelsByType.Values.Sum(l => l.Count);
+                summary.Append($" Model types: {BuildModelsByType.Count}, Total Models: {totalModels}.");
             }
-
-            if (ExtractionTypes.Contains(ExtractionType.All) || ExtractionTypes.Contains(ExtractionType.Models))
-            {
-                int totalModels = BuildModelsByType.Values.Sum(list => list.Count);
-                summary.Append($" Model types: {BuildModelsByType.Count()}, Total Models: {totalModels}.");
-            }
-            if (ExtractionTypes.Contains(ExtractionType.Spritesheet) || ExtractionTypes.Contains(ExtractionType.All))
+            if (Selection.WantsSpritesheet)
             {
                 int spriteCount = SpriteFlatBuffer.GetSprites().Sum(g => g.Value.Count);
-                summary.Append($" spritesheet keys: {spriteCount}.");
-                
+                summary.Append($" Spritesheet entries: {spriteCount}.");
             }
+            if (canTarget) summary.Append(" (Targeted image mode)");
             Debug.WriteLine(summary.ToString());
+
+            AssetOriginRegistry.LogAllDiagnostics(Selection, unityExtractor.GetNodeDiagnostics());
         }
+
+        private static void ApplySelectionFilters()
+        {
+            if (Selection.WantsImages && (Selection.ImageNames.Count > 0 || Selection.KnownImages.Count > 0) && !Selection.AllImagesRequested)
+            {
+                var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var n in Selection.ImageNames)
+                {
+                    keep.Add(n);
+                    keep.Add(Path.GetFileNameWithoutExtension(n));
+                }
+                foreach (var ki in Selection.KnownImages)
+                {
+                    var mapped = KnownImageMap.Map[ki].TextureName;
+                    keep.Add(mapped);
+                    keep.Add(mapped + ".png");
+                }
+                var remove = new List<string>();
+                foreach (var kv in BuildImages)
+                {
+                    var bare = Path.GetFileNameWithoutExtension(kv.Key);
+                    if (!keep.Contains(kv.Key) && !keep.Contains(bare))
+                        remove.Add(kv.Key);
+                }
+                foreach (var r in remove) BuildImages.Remove(r);
+            }
+
+            if (Selection.WantsModels && (Selection.ModelTypes.Count > 0 || Selection.ModelIdsByType.Count > 0))
+            {
+                var removeTypes = new List<string>();
+                foreach (var entry in BuildModelsByType)
+                {
+                    var typeName = entry.Key;
+                    bool keepAll = Selection.ModelTypes.Contains(typeName);
+                    if (keepAll) continue;
+
+                    var filtered = entry.Value.Where(obj =>
+                    {
+                        if (Selection.ModelTypes.Contains(typeName)) return true;
+                        if (Selection.ModelIdsByType.TryGetValue(typeName, out var ids))
+                        {
+                            var t = obj.GetType();
+                            var prop = t.GetProperty("Id") ?? t.GetProperty("ID") ?? t.GetProperty("Name");
+                            var val = prop?.GetValue(obj)?.ToString();
+                            return val != null && ids.Contains(val);
+                        }
+                        return false;
+                    }).ToList();
+
+                    if (filtered.Count == 0) removeTypes.Add(typeName);
+                    else BuildModelsByType[typeName] = filtered;
+                }
+                foreach (var t in removeTypes) BuildModelsByType.Remove(t);
+            }
+        }
+
         private static bool TryLoadSpritesheet(string path)
         {
-            if (!File.Exists(path)) return true; // nothing to load
-
+            if (!File.Exists(path)) return true;
             var fi = new FileInfo(path);
-            if (fi.Length == 0) return false; // empty -> bad cache
-
-            // quick sanity check
+            if (fi.Length == 0) return false;
             var first = File.ReadLines(path).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l)) ?? "";
             if (!first.Contains("<")) return false;
-
-            // this can still throw if XML is truncated; keep a local try
             try
             {
                 var xs = new XmlSerializer(typeof(DecompiledSpriteSheet));
@@ -368,6 +372,5 @@ namespace RotMGAssetExtractor
             }
             catch { return false; }
         }
-
     }
 }
