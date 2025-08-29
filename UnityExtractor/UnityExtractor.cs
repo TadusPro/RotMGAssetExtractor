@@ -100,7 +100,6 @@ namespace RotMGAssetExtractor.Parser
                 var typeName = el.Element("Class")?.Value?.Trim();
                 if (string.IsNullOrEmpty(typeName)) typeName = el.Name.LocalName;
 
-
                 if (modelTypes.TryGetValue(typeName, out var targetType))
                 {
                     var obj = typeof(UnityExtractor)
@@ -132,7 +131,6 @@ namespace RotMGAssetExtractor.Parser
 
             foreach (var p in props)
             {
-                /* figure out the XML tag / attr name -------------------------------- */
                 var xmlAttr = p.GetCustomAttribute<XmlAttributeAttribute>();
                 var xmlElem = p.GetCustomAttribute<XmlElementAttribute>();
                 var xmlTxt = p.GetCustomAttribute<XmlTextAttribute>() != null;
@@ -141,7 +139,6 @@ namespace RotMGAssetExtractor.Parser
                        ?? xmlElem?.ElementName
                        ?? p.Name;
 
-                /* ----- ARRAY-OF-OBJECTS  (e.g. LevelIncrease[]) -------------------- */
                 if (p.PropertyType.IsArray &&
                     p.PropertyType.GetElementType()!.IsClass &&
                     p.PropertyType != typeof(string[]))
@@ -160,10 +157,9 @@ namespace RotMGAssetExtractor.Parser
 
                     p.SetValue(obj, arr);
                     if (items.Length > 0) used.Add(name);
-                    continue;                   // skip the scalar switch
+                    continue;
                 }
 
-                /* lookup (case-insensitive) ----------------------------------------- */
                 var attr = el.Attributes()
                               .FirstOrDefault(a => a.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase));
                 var child = el.Elements()
@@ -172,47 +168,64 @@ namespace RotMGAssetExtractor.Parser
                 string? raw = xmlTxt ? el.Value : attr?.Value ?? child?.Value;
                 if (raw == null && child == null && !xmlTxt) continue;
 
-                /* scalar / nested-object mapping ------------------------------------ */
-                object val = p.PropertyType switch
+                object val;
+
+                if (p.PropertyType == typeof(bool))
                 {
-                    Type t when t == typeof(bool) =>
-                        raw != null ? bool.TryParse(raw, out var b) && b : attr != null,
+                    bool parsed;
+                    if (attr != null)
+                    {
+                        parsed = !IsExplicitFalse(raw);
+                    }
+                    else if (child != null)
+                    {
+                        parsed = string.IsNullOrWhiteSpace(raw) || !IsExplicitFalse(raw);
+                    }
+                    else
+                    {
+                        parsed = false;
+                    }
+                    val = parsed;
+                }
+                else
+                {
+                    val = p.PropertyType switch
+                    {
+                        Type t when t == typeof(int[]) =>
+                            string.IsNullOrWhiteSpace(raw)
+                                ? Array.Empty<int>()
+                                : raw.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                                     .Select(int.Parse).ToArray(),
 
-                    Type t when t == typeof(int[]) =>
-                        string.IsNullOrWhiteSpace(raw)
-                            ? Array.Empty<int>()
-                            : raw.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(int.Parse).ToArray(),
+                        Type t when t == typeof(int) =>
+                            raw != null && raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                                ? Convert.ToInt32(raw, 16)
+                                : int.TryParse(raw, NumberStyles.Integer,
+                                               CultureInfo.InvariantCulture, out var i) ? i : 0,
 
-                    Type t when t == typeof(int) =>
-                        raw != null && raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-                            ? Convert.ToInt32(raw, 16)
-                            : int.TryParse(raw, NumberStyles.Integer,
-                                           CultureInfo.InvariantCulture, out var i) ? i : 0,
+                        Type t when t == typeof(double) =>
+                            double.TryParse(raw, NumberStyles.Float,
+                                            CultureInfo.InvariantCulture, out var d) ? d : 0d,
 
-                    Type t when t == typeof(double) =>
-                        double.TryParse(raw, NumberStyles.Float,
-                                        CultureInfo.InvariantCulture, out var d) ? d : 0d,
+                        Type t when t == typeof(float) =>
+                            float.TryParse(raw, NumberStyles.Float,
+                                           CultureInfo.InvariantCulture, out var f) ? f : 0f,
 
-                    Type t when t == typeof(float) =>
-                        float.TryParse(raw, NumberStyles.Float,
-                                       CultureInfo.InvariantCulture, out var f) ? f : 0f,
+                        _ when p.PropertyType.IsClass && p.PropertyType != typeof(string) =>
+                            typeof(UnityExtractor)
+                                .GetMethod(nameof(MapXmlElementToObject),
+                                           BindingFlags.NonPublic | BindingFlags.Static)!
+                                .MakeGenericMethod(p.PropertyType)
+                                .Invoke(null, new object[] { child ?? el })!,
 
-                    _ when p.PropertyType.IsClass && p.PropertyType != typeof(string) =>
-                        typeof(UnityExtractor)
-                            .GetMethod(nameof(MapXmlElementToObject),
-                                       BindingFlags.NonPublic | BindingFlags.Static)!
-                            .MakeGenericMethod(p.PropertyType)
-                            .Invoke(null, new object[] { child ?? el })!,
-
-                    _ => raw ?? string.Empty
-                };
+                        _ => raw ?? string.Empty
+                    };
+                }
 
                 p.SetValue(obj, val);
                 used.Add(xmlTxt ? "#text" : name);
             }
 
-            /* unused attributes / children ----------------------------------------- */
             foreach (var a in el.Attributes())
                 if (!used.Contains(a.Name.LocalName))
                     IncrementNestedStatic(unusedAttrByNodeStatic,
@@ -226,14 +239,23 @@ namespace RotMGAssetExtractor.Parser
             return obj;
         }
 
+        private static bool IsExplicitFalse(string? raw)
+        {
+            if (raw == null) return false;
+            var r = raw.Trim();
+            return r.Equals("false", StringComparison.OrdinalIgnoreCase)
+                || r.Equals("0", StringComparison.OrdinalIgnoreCase)
+                || r.Equals("no", StringComparison.OrdinalIgnoreCase)
+                || r.Equals("off", StringComparison.OrdinalIgnoreCase);
+        }
 
-        // these are only used inside static mapper; they proxy to outer instance via lazy re‑attach in RunExtractionPipeline.
+        // static diagnostics stores
         private static Dictionary<string, Dictionary<string, int>> unusedAttrByNodeStatic;
         private static Dictionary<string, Dictionary<string, int>> unusedChildByNodeStatic;
 
         static void IncrementNestedStatic(Dictionary<string, Dictionary<string, int>> dict, string parent, string key)
         {
-            if (dict == null) return; // instance not set yet
+            if (dict == null) return;
             if (!dict.TryGetValue(parent, out var inner))
             {
                 inner = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -291,7 +313,6 @@ namespace RotMGAssetExtractor.Parser
             var allTextures = resources.SelectMany(r => r.assetTexture2Ds).ToList();
 
             Debug.WriteLine($"[Debug] Found {allTextures.Count} total Texture2D assets.");
-            // expetion here? System.ArgumentException: 'An item with the same key has already been added. Key: 3'
             var textureMap = allTextures
                 .GroupBy(t => t.PathId)
                 .ToDictionary(g => g.Key, g => g.First());
@@ -301,11 +322,6 @@ namespace RotMGAssetExtractor.Parser
             int processedCount = 0;
             foreach (var tex in allTextures)
             {
-
-                //[Debug] Processing texture 'characters_masks' which is a known sprite sheet.
-                //[GameData] Storing texture: characters_masks.png
-
-                //Debug.WriteLine($"[Debug] Processing texture '{tex.Name}' with pathid '{tex.PathId}'which is a known sprite sheet.");
                 if(tex.Name == "characters_masks" || tex.Name == "mapObjects")
                 {
                     Debug.WriteLine(tex);
@@ -313,7 +329,6 @@ namespace RotMGAssetExtractor.Parser
 
                 if (!AdvancedImaging.TryConvertTextureToBgra32(tex, decoder, out var bgra))
                 {
-                    //Debug.WriteLine($"[Warning] SKIPPING {tex.Name} (unsupported format: {tex.TextureFormat})");
                     continue;
                 }
 
